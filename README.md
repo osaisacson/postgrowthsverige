@@ -44,6 +44,6 @@ npx wrangler pages deploy
 
 Later deploys only need `npx wrangler pages deploy`.
 
-**Changing the admin password:** run `node scripts/hash-password.mjs 'new password'`, store the output with `wrangler pages secret put ADMIN_PASSWORD_HASH`, then deploy again.
+**Passwords and admins:** these are managed in the site itself (/admin → Administratörer, Byt lösenord, Glömt lösenordet?). `ADMIN_EMAIL` and `ADMIN_PASSWORD_HASH` only seed the first admin when the admins table is empty. If every admin is locked out, hash a new password with `node scripts/hash-password.mjs 'new password'` and run `UPDATE admins SET password_hash = '<hash>' WHERE email = '<email>'` in the D1 console.
 
 **Importing the Obsidian vault:** `scripts/prepare_import.py` builds `import/` from the vault files. Then run `PGS_EMAIL=... PGS_PASSWORD=... node scripts/import.mjs https://<site>`. The import refuses to run if the site already has pages.
