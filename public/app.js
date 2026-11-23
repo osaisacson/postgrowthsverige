@@ -494,7 +494,8 @@
         inner.append(el('section', { class: 'backlinks' }, el('h4', {}, 'Länkar hit'), back.map((p) => el('a', { href: pageUrl(p) }, p.title))));
     }
 
-    right.append(renderGraphCard(page));
+    // Only show the graph when this page links somewhere or is linked to.
+    if (graphData(page, 'local').nodes.length > 1) right.append(renderGraphCard(page));
     if (toc.length && page.options.toc !== false) {
       const min = Math.min(...toc.map((t) => t.level));
       const nav = el(
@@ -553,18 +554,16 @@
   function renderGraphCard(page) {
     const card = el('div', { class: 'graph-card' });
     const canvas = el('canvas', { 'aria-label': 'Graf över länkade sidor', role: 'img' });
-    const modeLabel = el('div', { class: 'graph-mode' }, S.graphMode === 'local' ? 'Lokal graf' : 'Hela sajten');
     let graph;
     const toggle = iconBtn('global', 'Visa hela grafen', () => {
       S.graphMode = S.graphMode === 'local' ? 'global' : 'local';
       toggle.classList.toggle('on', S.graphMode === 'global');
       toggle.title = S.graphMode === 'local' ? 'Visa hela grafen' : 'Visa lokal graf';
-      modeLabel.textContent = S.graphMode === 'local' ? 'Lokal graf' : 'Hela sajten';
       const d = graphData(page, S.graphMode);
       graph.setData(d.nodes, d.links, d.current);
     }, S.graphMode === 'global' ? 'on' : '');
     const tools = el('div', { class: 'graph-tools' }, toggle, iconBtn('expand', 'Förstora grafen', () => openGraphModal(page)));
-    card.append(tools, canvas, modeLabel);
+    card.append(tools, canvas);
     requestAnimationFrame(() => {
       const d = graphData(page, S.graphMode);
       graph = new PGSGraph(canvas, { ...d, onClick: openNode });
