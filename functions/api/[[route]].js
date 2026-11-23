@@ -311,11 +311,11 @@ function inviteEmail(site, origin, link, inviter) {
   const admin = `${origin}/admin`;
   const steps = [
     `Gå till <a href="${admin}">${admin}</a> och logga in med din e-postadress och ditt lösenord.`,
-    'I menyn till vänster lägger du till en sektion med <b>Ny sektion</b>. Plustecknet bredvid en sektion skapar en ny sida i den.',
-    'Öppna en sida och klicka på <b>Redigera</b>. Du skriver i Markdown och ser resultatet direkt bredvid. Allt sparas automatiskt.',
-    'Skriv <code>[[</code> för att länka till en annan sida, till exempel <code>[[Definition]]</code>. Länkarna syns i grafen till höger.',
-    'Dra in eller klistra in en bild i texten för att ladda upp den.',
-    'Tre-punktsmenyn uppe till höger på en sida har fler val: innehållsförteckning av eller på, byt namn, flytta eller ta bort.',
+    'I menyn till vänster lägger du till en sektion med <b>Ny sektion</b>. Håll musen över en sektion för att se <b>+</b>, som skapar en ny sida i den, och <b>⋯</b>, där du byter namn på, flyttar eller tar bort sektionen.',
+    'Öppna en sida och klicka på <b>Redigera</b>. Du skriver direkt i sidan, som i Obsidian: rubriker, fetstil och länkar visas formaterade, och Markdown-tecknen syns bara på raden du skriver på. Allt sparas automatiskt. Klicka på <b>Klar</b> när du är färdig.',
+    'Skriv <code>[[</code> för att länka till en annan sida, så får du förslag på sidor att välja bland, till exempel <code>[[Definition]]</code>. Länkarna syns i grafen till höger.',
+    'Dra in eller klistra in en bild i texten för att ladda upp den, eller använd bildknappen uppe till höger i redigeraren.',
+    'Tre-punktsmenyn <b>⋯</b> uppe till höger på en sida har fler val: innehållsförteckning av eller på, byt namn, flytta upp eller ner i menyn, flytta till en annan sektion eller ta bort sidan.',
   ];
   const html = emailLayout(
     `Du är nu admin för ${escHtml(site)}`,

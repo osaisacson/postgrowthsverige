@@ -9,7 +9,7 @@ It runs entirely on Cloudflare's free plan:
 
 ## Writing content
 
-- Go to `/admin` and log in. In the left menu, **Ny sektion** adds a section. The **+** next to a section adds a page, and **⋯** renames, moves or deletes it.
+- Go to `/admin` and log in. In the left menu, **Ny sektion** adds a section. The **+** next to a section adds a page, and **⋯** renames, moves or deletes it (both show on hover). Pages are edited in place with live preview; the page's top-right **⋯** menu has TOC, rename, move and delete.
 - On a page, **Redigera** opens the Markdown editor with a live preview. It saves automatically.
 - `[[Page name]]` links to a page, and `[[Page name|text]]` shows different link text. Typing `[[` suggests page names.
 - Drag in or paste an image to upload it, which inserts `![[image.png]]`. `![[image.png|300]]` sets the width.
