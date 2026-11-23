@@ -393,7 +393,6 @@
       for (const p of secPages) {
         const link = el('a', { class: 'nav-page' + (page && page.id === p.id ? ' active' : ''), href: pageUrl(p) }, p.title);
         const prow = el('div', { class: 'nav-row' }, link);
-        if (admin) prow.append(el('div', { class: 'row-actions' }, iconBtn('dots', 'Fler val', (e) => pageMenu(e.currentTarget, p))));
         list.append(prow);
       }
       if (!secPages.length && admin) list.append(el('div', { class: 'nav-empty' }, 'Inga sidor än'));
@@ -403,7 +402,6 @@
     // Top-level pages without a section (other than home)
     for (const p of pages().filter((p) => p.section_id == null && !p.is_home)) {
       const prow = el('div', { class: 'nav-row' }, el('a', { class: 'nav-page' + (page && page.id === p.id ? ' active' : ''), href: pageUrl(p), style: { paddingLeft: '6px' } }, p.title));
-      if (admin) prow.append(el('div', { class: 'row-actions' }, iconBtn('dots', 'Fler val', (e) => pageMenu(e.currentTarget, p))));
       nav.append(prow);
     }
     left.append(nav);
@@ -791,7 +789,10 @@
       { text: 'Byt namn…', run: () => renamePage(p) },
     ];
     if (!p.is_home) {
+      const siblings = pages().filter((x) => x.section_id === p.section_id && !x.is_home);
       items.push(
+        { text: 'Flytta upp i menyn', run: () => move(siblings, p, -1, 'pages/reorder', { section_id: p.section_id }) },
+        { text: 'Flytta ner i menyn', run: () => move(siblings, p, 1, 'pages/reorder', { section_id: p.section_id }) },
         { text: 'Flytta till sektion…', run: () => movePageToSection(p) },
         {
           text: 'Gör till startsida',
@@ -1241,29 +1242,40 @@
     window.scrollTo(0, 0);
   }
 
+  let editorScript = null;
+  function loadEditor() {
+    if (window.PGSEditor) return Promise.resolve();
+    if (!editorScript)
+      editorScript = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = '/editor.js';
+        s.onload = resolve;
+        s.onerror = () => reject(new Error('Kunde inte ladda redigeraren'));
+        document.head.append(s);
+      });
+    return editorScript;
+  }
+
   function renderEditor(inner, page) {
-    const titleInput = el('input', { class: 'title-input', value: page.title, 'aria-label': 'Sidans namn' });
+    const titleInput = el('input', { class: 'title-input page-title', value: page.title, 'aria-label': 'Sidans namn' });
     const state = el('span', { class: 'save-state' }, 'Sparat');
-    const doneBtn = el('button', { class: 'btn primary', type: 'button' }, 'Klar');
-    const ta = el('textarea', { spellcheck: 'true', 'aria-label': 'Sidans innehåll (Markdown)' });
-    ta.value = page.content;
-    const preview = el('div', { class: 'preview markdown' });
-    const panes = el('div', { class: 'editor-panes show-write' }, ta, preview);
     const fileInput = el('input', { type: 'file', accept: 'image/*,application/pdf', multiple: true, style: { display: 'none' } });
+    const host = el('div', { class: 'cm-host markdown' });
+    let ed = null;
 
     let saveTimer = null;
     let saving = Promise.resolve();
     const setState = (t) => (state.textContent = t);
     const save = () => {
       clearTimeout(saveTimer);
-      if (!S.dirty) return saving;
-      const content = ta.value;
+      if (!S.dirty || !ed) return saving;
+      const content = ed.getValue();
       setState('Sparar…');
       saving = saving
         .then(() => api('pages/' + page.id, { method: 'PATCH', body: { content } }))
         .then(() => {
           page.content = content;
-          if (ta.value === content) {
+          if (ed.getValue() === content) {
             S.dirty = false;
             setState('Sparat');
           }
@@ -1274,36 +1286,14 @@
         });
       return saving;
     };
-    const updatePreview = () => (preview.innerHTML = renderMarkdown(ta.value).html);
-    let pv = null;
-    ta.addEventListener('input', () => {
-      S.dirty = true;
-      setState('Osparat');
-      clearTimeout(pv);
-      pv = setTimeout(updatePreview, 120);
-      clearTimeout(saveTimer);
-      saveTimer = setTimeout(save, 1500);
-      autocomplete.update();
-    });
-    ta.addEventListener('keydown', (e) => {
-      if (autocomplete.key(e)) return;
-      const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.key === 's') {
-        e.preventDefault();
-        save();
-      } else if (mod && e.key === 'b') {
-        e.preventDefault();
-        wrap('**', '**');
-      } else if (mod && e.key === 'i') {
-        e.preventDefault();
-        wrap('*', '*');
-      } else if (mod && e.key === 'k') {
-        e.preventDefault();
-        wrap('[[', ']]');
-      }
-    });
-    ta.addEventListener('blur', () => setTimeout(() => autocomplete.close(), 150));
-    ta.addEventListener('click', () => autocomplete.update());
+
+    const done = async () => {
+      await save();
+      if (S.dirty) return;
+      S.editing = null;
+      await reload().catch(() => {});
+      render();
+    };
 
     const renameFromInput = async () => {
       const t = titleInput.value.trim();
@@ -1316,10 +1306,11 @@
         page.title = t;
         history.replaceState(null, '', page.is_home ? '/' : '/' + r.slug);
         const fresh = pages().find((p) => p.id === page.id);
-        ta.value = fresh.content; // links inside this page may have been rewritten
+        if (ed && fresh.content !== ed.getValue()) ed.setValue(fresh.content);
         page.content = fresh.content;
+        S.dirty = false;
+        setState('Sparat');
         document.querySelector('.left').replaceWith(renderLeft(fresh));
-        toast('Namnet är ändrat');
       } catch (err) {
         toast(err.message, true);
       }
@@ -1327,42 +1318,12 @@
     titleInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        ta.focus();
+        ed && ed.focus();
       }
     });
     titleInput.addEventListener('change', renameFromInput);
 
-    doneBtn.addEventListener('click', async () => {
-      await save();
-      if (S.dirty) return;
-      S.editing = null;
-      await reload().catch(() => {});
-      render();
-    });
-
-    function insert(text, selectFrom, selectTo) {
-      ta.focus();
-      const ok = document.execCommand && document.execCommand('insertText', false, text);
-      if (!ok) {
-        ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, 'end');
-        ta.dispatchEvent(new Event('input'));
-      }
-      if (selectFrom != null) {
-        const end = ta.selectionEnd;
-        ta.setSelectionRange(end - text.length + selectFrom, end - text.length + selectTo);
-      }
-    }
-    function wrap(a, b) {
-      const s = ta.value.slice(ta.selectionStart, ta.selectionEnd);
-      insert(a + s + b, a.length, a.length + s.length);
-      if (a === '[[') autocomplete.update();
-    }
-    function linePrefix(prefix) {
-      const start = ta.value.lastIndexOf('\n', ta.selectionStart - 1) + 1;
-      ta.setSelectionRange(start, start);
-      insert(prefix);
-    }
-    async function uploadAndInsert(files) {
+    async function uploadAndInsert(files, insert) {
       for (const f of files) {
         try {
           setState('Laddar upp…');
@@ -1375,65 +1336,49 @@
       }
     }
     fileInput.addEventListener('change', () => {
-      uploadAndInsert([...fileInput.files]);
+      uploadAndInsert([...fileInput.files], (t) => ed.insert(t));
       fileInput.value = '';
     });
-    ta.addEventListener('paste', (e) => {
-      const files = [...(e.clipboardData?.files || [])];
-      if (files.length) {
-        e.preventDefault();
-        uploadAndInsert(files);
-      }
-    });
-    ta.addEventListener('dragover', (e) => {
-      if ([...e.dataTransfer.types].includes('Files')) {
-        e.preventDefault();
-        ta.classList.add('drop-hint');
-      }
-    });
-    ta.addEventListener('dragleave', () => ta.classList.remove('drop-hint'));
-    ta.addEventListener('drop', (e) => {
-      ta.classList.remove('drop-hint');
-      const files = [...(e.dataTransfer?.files || [])];
-      if (files.length) {
-        e.preventDefault();
-        uploadAndInsert(files);
-      }
-    });
 
-    const tb = (icon, title, fn, label) =>
-      el('button', { class: 'icon-btn', type: 'button', title, 'aria-label': title, onmousedown: (e) => e.preventDefault(), onclick: fn }, label ? label : svg(ICON[icon]));
-    const tabWrite = el('button', { class: 'btn', type: 'button', onclick: () => (panes.className = 'editor-panes show-write') }, 'Skriv');
-    const tabPrev = el('button', { class: 'btn', type: 'button', onclick: () => { updatePreview(); panes.className = 'editor-panes show-preview'; } }, 'Förhandsvisa');
-    const toolbar = el(
+    const head = el(
       'div',
-      { class: 'toolbar' },
-      tb(null, 'Fet (Ctrl/Cmd+B)', () => wrap('**', '**'), 'B'),
-      tb(null, 'Kursiv (Ctrl/Cmd+I)', () => wrap('*', '*'), el('i', {}, 'I')),
-      tb(null, 'Rubrik', () => linePrefix('## '), 'H2'),
-      tb(null, 'Underrubrik', () => linePrefix('### '), 'H3'),
-      tb('link', 'Länk till sida [[ ]] (Ctrl/Cmd+K)', () => wrap('[[', ']]')),
-      tb('quote', 'Citat', () => linePrefix('> ')),
-      tb('list', 'Lista', () => linePrefix('- ')),
-      tb('hr', 'Avdelare', () => insert('\n---\n')),
-      tb('image', 'Ladda upp bild eller PDF', () => fileInput.click()),
-      el('span', { class: 'spacer' }),
-      el('span', { class: 'tabs' }, tabWrite, tabPrev)
-    );
-
-    inner.append(
-      el('div', { class: 'editor-head' }, titleInput, state, doneBtn),
-      toolbar,
-      panes,
-      fileInput,
+      { class: 'page-head editor-top' },
+      titleInput,
       el(
         'div',
-        { class: 'hint', html: 'Skriv <code>[[</code> för att länka till en sida. Dra in eller klistra in bilder för att ladda upp dem. Sparas automatiskt.' }
+        { class: 'page-tools' },
+        state,
+        el('button', { class: 'btn', type: 'button', title: 'Lägg till bild eller PDF', 'aria-label': 'Lägg till bild eller PDF', onclick: () => fileInput.click() }, svg(ICON.image, 'width="15" height="15"')),
+        el('button', { class: 'btn primary', type: 'button', onclick: done }, 'Klar')
       )
     );
-    const autocomplete = makeAutocomplete(ta, page);
-    updatePreview();
-    setTimeout(() => ta.focus(), 0);
+    inner.append(head, host, fileInput, el('div', { class: 'hint', html: 'Skriv <code>[[</code> för att länka till en sida. Dra in eller klistra in bilder. Sparas automatiskt.' }));
+
+    loadEditor()
+      .then(() => {
+        ed = PGSEditor.create(host, {
+          doc: page.content,
+          placeholder: 'Börja skriva…',
+          fileUrl: (name) => fileUrl(name),
+          hasFile: (name) => hasFile(name),
+          pageExists: (name) => !!byName(name),
+          completions: (embed) => {
+            const pg = pages().filter((p) => p.id !== page.id).map((p) => ({ value: p.title, hint: sections().find((s) => s.id === p.section_id)?.name || '' }));
+            const fl = S.site.files.map((f) => ({ value: f, hint: 'fil' }));
+            return embed ? [...fl, ...pg] : [...pg, ...fl];
+          },
+          onChange: () => {
+            S.dirty = true;
+            setState('Osparat');
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(save, 1200);
+          },
+          onSave: save,
+          onFiles: (files, insert) => uploadAndInsert(files, insert),
+        });
+        ed.focus();
+      })
+      .catch((err) => toast(err.message, true));
   }
 
   async function uploadFile(file) {
@@ -1476,123 +1421,6 @@
       img.onerror = () => resolve(null);
       img.src = URL.createObjectURL(file);
     });
-  }
-
-  // [[ autocomplete
-  function makeAutocomplete(ta, page) {
-    let box = null, items = [], sel = 0, ctx = null;
-    function context() {
-      const pos = ta.selectionStart;
-      if (pos !== ta.selectionEnd) return null;
-      const before = ta.value.slice(0, pos);
-      const m = /(!?)\[\[([^\]\n[]*)$/.exec(before);
-      if (!m) return null;
-      const q = m[2];
-      if (q.includes('|')) return null;
-      return { embed: !!m[1], query: q, start: pos - q.length };
-    }
-    function options(c) {
-      const q = norm(c.query.split('#')[0].split('/').pop());
-      const pg = pages().filter((p) => p.id !== page.id).map((p) => ({ value: p.title, hint: sections().find((s) => s.id === p.section_id)?.name || '' }));
-      const fl = S.site.files.map((f) => ({ value: f, hint: 'fil' }));
-      const all = c.embed ? [...fl, ...pg] : [...pg, ...fl];
-      const scored = all
-        .map((o) => {
-          const v = norm(o.value);
-          const i = v.indexOf(q);
-          return { o, s: q === '' ? 1 : v.startsWith(q) ? 0 : i >= 0 ? 1 : -1 };
-        })
-        .filter((x) => x.s >= 0)
-        .sort((a, b) => a.s - b.s);
-      return scored.slice(0, 12).map((x) => x.o);
-    }
-    function close() {
-      box?.remove();
-      box = null;
-      ctx = null;
-    }
-    function pick(i) {
-      const o = items[i];
-      if (!o || !ctx) return;
-      const after = ta.value.slice(ta.selectionStart);
-      const closing = after.startsWith(']]') ? '' : ']]';
-      ta.setSelectionRange(ctx.start, ta.selectionStart);
-      const text = o.value + closing;
-      const ok = document.execCommand && document.execCommand('insertText', false, text);
-      if (!ok) {
-        ta.setRangeText(text, ctx.start, ta.selectionEnd, 'end');
-        ta.dispatchEvent(new Event('input'));
-      }
-      if (!closing) ta.setSelectionRange(ta.selectionStart + 2, ta.selectionStart + 2);
-      close();
-    }
-    function draw() {
-      box.replaceChildren(
-        ...items.map((o, i) =>
-          el(
-            'div',
-            { class: i === sel ? 'sel' : '', onmousedown: (e) => { e.preventDefault(); pick(i); } },
-            o.value,
-            o.hint ? el('small', {}, o.hint) : null
-          )
-        )
-      );
-      box.children[sel]?.scrollIntoView({ block: 'nearest' });
-    }
-    function update() {
-      ctx = context();
-      if (!ctx) return close();
-      items = options(ctx);
-      if (!items.length) return close();
-      sel = 0;
-      if (!box) {
-        box = el('div', { class: 'autocomplete', role: 'listbox' });
-        document.body.append(box);
-      }
-      const c = caretXY(ta);
-      box.style.left = Math.min(c.x, window.innerWidth - 300) + 'px';
-      box.style.top = c.y + 22 + 'px';
-      draw();
-      const r = box.getBoundingClientRect();
-      if (r.bottom > window.innerHeight - 8) box.style.top = c.y - r.height - 4 + 'px';
-    }
-    function key(e) {
-      if (!box) return false;
-      if (e.key === 'ArrowDown') sel = (sel + 1) % items.length;
-      else if (e.key === 'ArrowUp') sel = (sel - 1 + items.length) % items.length;
-      else if (e.key === 'Enter' || e.key === 'Tab') {
-        e.preventDefault();
-        pick(sel);
-        return true;
-      } else if (e.key === 'Escape') {
-        close();
-        e.preventDefault();
-        return true;
-      } else return false;
-      e.preventDefault();
-      draw();
-      return true;
-    }
-    return { update, key, close };
-  }
-
-  // Caret position in viewport coordinates, via a mirror element.
-  function caretXY(ta) {
-    const cs = getComputedStyle(ta);
-    const m = document.createElement('div');
-    for (const p of ['boxSizing', 'width', 'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'borderTopWidth', 'borderLeftWidth', 'tabSize'])
-      m.style[p] = cs[p];
-    Object.assign(m.style, { position: 'absolute', visibility: 'hidden', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', top: '0', left: '-9999px' });
-    m.textContent = ta.value.slice(0, ta.selectionStart);
-    const span = document.createElement('span');
-    span.textContent = '​';
-    m.append(span);
-    document.body.append(m);
-    const r = ta.getBoundingClientRect();
-    const x = r.left + span.offsetLeft - ta.scrollLeft;
-    const y = r.top + span.offsetTop - ta.scrollTop;
-    m.remove();
-    return { x, y };
   }
 
   // ---------------------------------------------------------------- boot
