@@ -5,4 +5,4 @@ compatibility_date = "2024-11-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "postgrowthsverige"
-database_id = "REPLACE_WITH_D1_ID"
+database_id = "cc3fc93a-827a-4e5e-8db0-763714c86dac"
