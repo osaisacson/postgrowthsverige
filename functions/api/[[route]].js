@@ -7,6 +7,7 @@ import {
   randomToken,
   sha256,
   sendEmail,
+  emailConfigured,
   json,
   uniqueSlug,
   getSite,
@@ -48,12 +49,50 @@ export async function onRequest(context) {
     const handled = await adminRoutes(request, env, url, parts, method, me, body);
     if (handled) return handled;
 
-    if (parts[0] === 'settings' && method === 'PATCH') {
-      if (typeof body.site_title === 'string' && body.site_title.trim()) {
-        await db.prepare("INSERT INTO settings (key, value) VALUES ('site_title', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-          .bind(body.site_title.trim()).run();
+    if (parts[0] === 'settings') {
+      if (method === 'GET') {
+        const s = await loadSettings(db);
+        return json({
+          site_title: s.site_title || 'Post-growth Sverige',
+          email_from: s.email_from || '',
+          smtp_host: s.smtp_host || '',
+          smtp_port: s.smtp_port || '',
+          smtp_user: s.smtp_user || '',
+          smtp_pass_set: !!(s.smtp_pass || env.SMTP_PASS),
+          email_configured: emailConfigured(mailEnvFrom(env, s)),
+          env_email: !!(env.SMTP_HOST || env.RESEND_API_KEY),
+        });
       }
-      return json({ ok: true });
+      if (parts[1] === 'test-email' && method === 'POST') {
+        const s = await loadSettings(db);
+        const to = normEmail(body.to) || me;
+        try {
+          const sent = await sendEmail(mailEnvFrom(env, s), {
+            to,
+            subject: `Testmejl från ${s.site_title || 'Post-growth Sverige'}`,
+            html: emailLayout('Testmejl', '<p>Det här är ett testutskick. Om du ser det fungerar e-postinställningarna.</p>'),
+            text: 'Det här är ett testutskick. Om du ser det fungerar e-postinställningarna.',
+          });
+          return sent ? json({ ok: true, to }) : json({ error: 'Ingen e-post är konfigurerad.' }, 400);
+        } catch (err) {
+          return json({ error: err.message }, 400);
+        }
+      }
+      if (method === 'PATCH') {
+        const sets = [];
+        if (typeof body.site_title === 'string' && body.site_title.trim()) sets.push(['site_title', body.site_title.trim()]);
+        for (const k of ['email_from', 'smtp_host', 'smtp_port', 'smtp_user']) if (typeof body[k] === 'string') sets.push([k, body[k].trim()]);
+        // Password: only overwrite when a non-empty value is sent; empty string with clear_pass removes it.
+        if (typeof body.smtp_pass === 'string' && body.smtp_pass) sets.push(['smtp_pass', body.smtp_pass]);
+        if (body.clear_pass) sets.push(['smtp_pass', '']);
+        if (sets.length)
+          await db.batch(
+            sets.map(([k, v]) =>
+              db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind(k, v)
+            )
+          );
+        return json({ ok: true });
+      }
     }
 
     if (parts[0] === 'sections') {
@@ -239,6 +278,26 @@ async function siteTitle(db) {
   return r ? r.value : 'Post-growth Sverige';
 }
 
+const EMAIL_KEYS = ['email_from', 'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass'];
+async function loadSettings(db) {
+  const r = await db.prepare('SELECT key, value FROM settings').all();
+  return Object.fromEntries(r.results.map((x) => [x.key, x.value]));
+}
+// Email config lives in the Settings page (DB), falling back to the Cloudflare secrets.
+function mailEnvFrom(env, s) {
+  return {
+    ...env,
+    EMAIL_FROM: s.email_from || env.EMAIL_FROM,
+    SMTP_HOST: s.smtp_host || env.SMTP_HOST,
+    SMTP_PORT: s.smtp_port || env.SMTP_PORT,
+    SMTP_USER: s.smtp_user || env.SMTP_USER,
+    SMTP_PASS: s.smtp_pass || env.SMTP_PASS,
+  };
+}
+async function mailEnv(env, db) {
+  return mailEnvFrom(env, await loadSettings(db));
+}
+
 function emailLayout(title, bodyHtml) {
   return `<!doctype html><html><body style="margin:0;padding:24px;background:#f6f8f7;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#222;line-height:1.55">
 <div style="max-width:560px;margin:0 auto;background:#fff;border:1px solid #e4e7e5;border-radius:12px;padding:28px">
@@ -277,14 +336,14 @@ ${steps.map((s, i) => `${i + 1}. ${s.replace(/<[^>]+>/g, '')}`).join('\n')}
   return { subject: `Du är nu admin för ${site}`, html, text };
 }
 
-function resetEmail(site, link) {
+function resetEmail(site, link, valid = '1 timme') {
   const html = emailLayout(
     'Återställ ditt lösenord',
     `<p>Någon bad om att återställa lösenordet för ditt admin-konto på ${escHtml(site)}. Klicka på knappen för att välja ett nytt lösenord:</p>
 ${btn(link, 'Välj nytt lösenord')}
-<p style="font-size:13px;color:#5c625f">Länken gäller i 1 timme. Om det inte var du kan du strunta i det här mejlet.</p>`
+<p style="font-size:13px;color:#5c625f">Länken gäller i ${valid}. Om det inte var du kan du strunta i det här mejlet.</p>`
   );
-  const text = `Välj ett nytt lösenord för ditt admin-konto på ${site} (länken gäller i 1 timme):\n${link}\n\nOm det inte var du kan du strunta i det här mejlet.`;
+  const text = `Välj ett nytt lösenord för ditt admin-konto på ${site} (länken gäller i ${valid}):\n${link}\n\nOm det inte var du kan du strunta i det här mejlet.`;
   return { subject: `Återställ lösenordet för ${site}`, html, text };
 }
 
@@ -300,10 +359,10 @@ async function forgotPassword(request, env, url) {
   if (row) {
     const token = await issueToken(db, email, 'reset', 1);
     const msg = resetEmail(await siteTitle(db), `${url.origin}/admin/reset?token=${token}`);
-    await sendEmail(env, { to: email, ...msg }).catch(() => {});
+    await sendEmail(await mailEnv(env, db), { to: email, ...msg }).catch(() => {});
   }
   // Same answer either way, so the form doesn't reveal who is an admin.
-  return json({ ok: true, emailConfigured: !!env.RESEND_API_KEY });
+  return json({ ok: true, emailConfigured: emailConfigured(await mailEnv(env, db)) });
 }
 
 async function setPassword(request, env, url) {
@@ -334,7 +393,7 @@ async function adminRoutes(request, env, url, parts, method, me, body) {
   if (parts[0] !== 'admins') return null;
   if (!parts[1] && method === 'GET') {
     const r = await db.prepare('SELECT email, password_hash IS NULL AS pending, invited_by, created_at FROM admins ORDER BY created_at').all();
-    return json({ me, emailConfigured: !!env.RESEND_API_KEY, admins: r.results.map((a) => ({ ...a, pending: !!a.pending })) });
+    return json({ me, emailConfigured: emailConfigured(await mailEnv(env, db)), admins: r.results.map((a) => ({ ...a, pending: !!a.pending })) });
   }
   if (!parts[1] && method === 'POST') {
     const email = normEmail(body.email);
@@ -348,7 +407,25 @@ async function adminRoutes(request, env, url, parts, method, me, body) {
     let sent = false;
     let warning = null;
     try {
-      sent = await sendEmail(env, { to: email, ...msg });
+      sent = await sendEmail(await mailEnv(env, db), { to: email, ...msg });
+    } catch (err) {
+      warning = err.message;
+    }
+    return json({ ok: true, sent, link: sent ? null : link, warning });
+  }
+  if (parts[1] && parts[2] === 'reset' && method === 'POST') {
+    const email = normEmail(parts[1]);
+    const row = await db.prepare('SELECT password_hash FROM admins WHERE email = ?').bind(email).first();
+    if (!row) return json({ error: 'Admin finns inte.' }, 404);
+    const site = await siteTitle(db);
+    const pending = !row.password_hash;
+    const token = await issueToken(db, email, pending ? 'invite' : 'reset', pending ? 24 * 7 : 24);
+    const link = `${url.origin}/admin/reset?token=${token}`;
+    const msg = pending ? inviteEmail(site, url.origin, link, me) : resetEmail(site, link, '24 timmar');
+    let sent = false;
+    let warning = null;
+    try {
+      sent = await sendEmail(await mailEnv(env, db), { to: email, ...msg });
     } catch (err) {
       warning = err.message;
     }

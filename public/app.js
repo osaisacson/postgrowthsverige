@@ -435,7 +435,7 @@
           el('span', { class: 'badge' }, 'Admin'),
           el('button', { type: 'button', onclick: manageAdmins }, 'Administratörer'),
           el('button', { type: 'button', onclick: changePassword }, 'Byt lösenord'),
-          el('button', { type: 'button', onclick: siteSettings }, 'Sajtens namn'),
+          el('button', { type: 'button', onclick: siteSettings }, 'Inställningar'),
           el('button', { type: 'button', onclick: logout }, 'Logga ut')
         )
       );
@@ -830,11 +830,89 @@
   }
 
   async function siteSettings() {
-    const title = await dialog({ title: 'Sajtens namn', text: 'Visas överst i menyn och i webbläsarfliken.', input: { value: S.site.title }, confirm: 'Spara' });
-    if (!title) return;
-    await api('settings', { method: 'PATCH', body: { site_title: title } });
-    await reload();
-    render();
+    let s;
+    try {
+      s = await api('settings');
+    } catch (ex) {
+      return toast(ex.message, true);
+    }
+    const dlg = el('dialog', { class: 'dlg dlg-wide' });
+    const field = (label, input, hint) => el('div', { class: 'field' }, el('label', {}, label), input, hint ? el('small', {}, hint) : null);
+    const title = el('input', { value: s.site_title, required: true });
+    const from = el('input', { type: 'email', value: s.email_from, placeholder: 'asaisacson@gmail.com' });
+    const host = el('input', { value: s.smtp_host, placeholder: 't.ex. smtp.gmail.com' });
+    const port = el('input', { value: s.smtp_port || '465', placeholder: '465' });
+    const user = el('input', { value: s.smtp_user, placeholder: 'inloggningsnamn / e-post', autocomplete: 'off' });
+    const pass = el('input', { type: 'password', placeholder: s.smtp_pass_set ? '•••••••• (sparat, lämna tomt för att behålla)' : 'lösenord / app-lösenord', autocomplete: 'new-password' });
+    const err = el('div', { class: 'err' });
+    const testNote = el('div', { class: 'admin-note' });
+
+    const collect = () => ({
+      site_title: title.value,
+      email_from: from.value,
+      smtp_host: host.value,
+      smtp_port: port.value,
+      smtp_user: user.value,
+      ...(pass.value ? { smtp_pass: pass.value } : {}),
+    });
+    const save = async () => {
+      await api('settings', { method: 'PATCH', body: collect() });
+      pass.value = '';
+      await reload();
+    };
+
+    const testBtn = el(
+      'button',
+      {
+        class: 'btn',
+        type: 'button',
+        onclick: async () => {
+          testNote.replaceChildren('Sparar och skickar…');
+          try {
+            await save();
+            const r = await api('settings/test-email', { method: 'POST', body: { to: S.site.me } });
+            testNote.replaceChildren(el('span', { style: { color: 'var(--accent-hover)' } }, `Testmejl skickat till ${r.to}. Kolla inkorgen (och skräpposten).`));
+          } catch (ex) {
+            testNote.replaceChildren(el('span', { class: 'err' }, ex.message));
+          }
+        },
+      },
+      'Spara och skicka testmejl'
+    );
+    const form = el(
+      'form',
+      {
+        onsubmit: async (e) => {
+          e.preventDefault();
+          err.textContent = '';
+          try {
+            await save();
+            render();
+            dlg.close();
+            toast('Inställningar sparade');
+          } catch (ex) {
+            err.textContent = ex.message;
+          }
+        },
+      },
+      el('h3', {}, 'Inställningar'),
+      field('Sajtens namn', title, 'Visas överst i menyn och i webbläsarfliken.'),
+      el('h4', { class: 'settings-sub' }, 'E-post'),
+      el('p', { class: 'settings-intro' }, 'Används för att skicka inbjudningar och återställning av lösenord. Fyll i din e-postleverantörs SMTP-uppgifter.'),
+      field('Avsändaradress', from, 'Adressen mejlen skickas från.'),
+      field('SMTP-server', host),
+      field('Port', port, 'Oftast 465.'),
+      field('Användarnamn', user),
+      field('Lösenord', pass, 'För Gmail: skapa ett app-lösenord under ditt Google-konto. Lagras i sajtens databas.'),
+      testNote,
+      err,
+      el('div', { class: 'actions' }, testBtn, el('span', { style: { flex: 1 } }), el('button', { class: 'btn', type: 'button', onclick: () => dlg.close() }, 'Avbryt'), el('button', { class: 'btn primary', type: 'submit' }, 'Spara'))
+    );
+    dlg.append(el('div', { class: 'dlg-body' }, form));
+    dlg.addEventListener('close', () => dlg.remove());
+    document.body.append(dlg);
+    dlg.showModal();
+    title.focus();
   }
   async function logout() {
     if (S.dirty && !(await confirmDlg('Osparade ändringar', 'Logga ut ändå?', 'Logga ut'))) return;
@@ -989,6 +1067,24 @@
   }
 
   // ---------------------------------------------------------------- admins & password
+  function showInviteResult(note, r, email, isInvite) {
+    note.replaceChildren();
+    if (r.sent) {
+      note.append(isInvite ? `Inbjudan skickad till ${email}.` : `En återställningslänk är skickad till ${email}.`);
+      return;
+    }
+    const link = el('input', { value: r.link, readonly: true, onclick: (ev) => ev.target.select() });
+    note.append(
+      el(
+        'p',
+        {},
+        r.warning ? `E-posten kunde inte skickas (${r.warning}). ` : 'Utskick av e-post är inte påslaget än. ',
+        `Skicka den här länken till ${email} själv:`
+      ),
+      link
+    );
+  }
+
   async function manageAdmins() {
     let data;
     try {
@@ -1008,29 +1104,53 @@
             'div',
             { class: 'admin-row' },
             el('div', {}, el('div', { class: 'admin-email' }, a.email, a.email === data.me ? el('small', {}, ' (du)') : null), a.pending ? el('small', { class: 'pending' }, 'Inbjuden, har inte valt lösenord än') : null),
-            a.email === data.me
-              ? null
-              : el(
-                  'button',
-                  {
-                    class: 'btn danger',
-                    type: 'button',
-                    onclick: async () => {
-                      dlg.close();
-                      const ok = await confirmDlg(`Ta bort ${a.email}?`, 'Personen kan inte längre logga in som admin.', 'Ta bort', true);
-                      if (ok) {
-                        try {
-                          await api('admins/' + encodeURIComponent(a.email), { method: 'DELETE' });
-                          toast('Admin borttagen');
-                        } catch (ex) {
-                          toast(ex.message, true);
-                        }
-                      }
-                      manageAdmins();
-                    },
+            el(
+              'div',
+              { class: 'admin-actions' },
+              el(
+                'button',
+                {
+                  class: 'btn',
+                  type: 'button',
+                  title: a.pending ? 'Skicka inbjudan igen' : 'Skicka en länk för att välja nytt lösenord',
+                  onclick: async (e) => {
+                    e.target.disabled = true;
+                    note.replaceChildren();
+                    try {
+                      const r = await api('admins/' + encodeURIComponent(a.email) + '/reset', { method: 'POST' });
+                      showInviteResult(note, r, a.email, a.pending);
+                    } catch (ex) {
+                      note.append(el('span', { class: 'err' }, ex.message));
+                    }
+                    e.target.disabled = false;
                   },
-                  'Ta bort'
-                )
+                },
+                a.pending ? 'Skicka igen' : 'Återställ lösenord'
+              ),
+              a.email === data.me
+                ? null
+                : el(
+                    'button',
+                    {
+                      class: 'btn danger',
+                      type: 'button',
+                      onclick: async () => {
+                        dlg.close();
+                        const ok = await confirmDlg(`Ta bort ${a.email}?`, 'Personen kan inte längre logga in som admin.', 'Ta bort', true);
+                        if (ok) {
+                          try {
+                            await api('admins/' + encodeURIComponent(a.email), { method: 'DELETE' });
+                            toast('Admin borttagen');
+                          } catch (ex) {
+                            toast(ex.message, true);
+                          }
+                        }
+                        manageAdmins();
+                      },
+                    },
+                    'Ta bort'
+                  )
+            )
           )
         )
       );
@@ -1045,17 +1165,11 @@
           addBtn.disabled = true;
           note.replaceChildren();
           try {
-            const r = await api('admins', { method: 'POST', body: { email: input.value } });
+            const email = input.value;
+            const r = await api('admins', { method: 'POST', body: { email } });
             data = await api('admins');
             draw();
-            if (r.sent) note.append(`Inbjudan skickad till ${input.value}.`);
-            else {
-              const link = el('input', { value: r.link, readonly: true, onclick: (ev) => ev.target.select() });
-              note.append(
-                el('p', {}, r.warning ? `E-posten kunde inte skickas (${r.warning}). ` : 'Utskick av e-post är inte påslaget än. ', 'Skicka den här länken till personen själv. Den gäller i 7 dagar:'),
-                link
-              );
-            }
+            showInviteResult(note, r, email, true);
             input.value = '';
           } catch (ex) {
             note.append(el('span', { class: 'err' }, ex.message));
