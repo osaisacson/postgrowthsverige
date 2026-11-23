@@ -1,5 +1,5 @@
 // Injects site data and per-page <title>/meta into the HTML shell so pages render instantly and share nicely.
-import { getSite, isAdmin } from '../lib/server.js';
+import { getSite, currentAdmin } from '../lib/server.js';
 
 const ASSET = /\.(js|css|svg|png|jpe?g|webp|ico|txt|json|map|woff2?)$/i;
 
@@ -12,14 +12,14 @@ export async function onRequest(context) {
   const res = await next();
   if (!(res.headers.get('Content-Type') || '').includes('text/html')) return res;
 
-  const admin = await isAdmin(request, env);
+  const admin = await currentAdmin(request, env);
   const site = await getSite(env, admin);
   const slug = decodeURIComponent(url.pathname.replace(/^\/+|\/+$/g, ''));
   const page = slug && slug !== 'admin' ? site.pages.find((p) => p.slug === slug) : site.pages.find((p) => p.is_home);
   const title = page && !page.is_home ? `${page.title} - ${site.title}` : site.title;
   const desc = page ? describe(page.content) : '';
   const data = JSON.stringify(site).replace(/</g, '\\u003c').replace(/[\u2028\u2029]/g, (c) => '\\u' + c.charCodeAt(0).toString(16));
-  const status = slug && slug !== 'admin' && !page ? 404 : 200;
+  const status = slug && !slug.startsWith('admin') && !page ? 404 : 200;
 
   const out = new HTMLRewriter()
     .on('title', { element(el) { el.setInnerContent(title); } })

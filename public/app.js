@@ -248,6 +248,7 @@
   function currentRoute() {
     const path = decodeURIComponent(location.pathname.replace(/^\/+|\/+$/g, ''));
     if (path === 'admin') return { admin: true };
+    if (path === 'admin/reset') return { reset: true };
     if (!path) return { page: home() };
     return { page: pages().find((p) => p.slug === path) || byName(path) || null, missing: path };
   }
@@ -303,6 +304,7 @@
     closeMenus();
     if (!S.site) return;
     const route = currentRoute();
+    if (route.reset) return renderReset();
     if (route.admin) {
       if (S.site.admin) return navigate('/', { replace: true });
       return renderLogin();
@@ -431,7 +433,9 @@
           'div',
           { class: 'admin-foot' },
           el('span', { class: 'badge' }, 'Admin'),
-          el('button', { type: 'button', onclick: siteSettings }, 'Inställningar'),
+          el('button', { type: 'button', onclick: manageAdmins }, 'Administratörer'),
+          el('button', { type: 'button', onclick: changePassword }, 'Byt lösenord'),
+          el('button', { type: 'button', onclick: siteSettings }, 'Sajtens namn'),
           el('button', { type: 'button', onclick: logout }, 'Logga ut')
         )
       );
@@ -842,6 +846,109 @@
   }
 
   // ---------------------------------------------------------------- login
+  function authCard(...kids) {
+    app.replaceChildren(el('div', { class: 'login-wrap' }, ...kids));
+  }
+
+  function renderForgot(prefill = '') {
+    document.title = 'Glömt lösenordet - ' + S.site.title;
+    const err = el('div', { class: 'err', role: 'alert' });
+    const email = el('input', { type: 'email', id: 'email', autocomplete: 'username', required: true, value: prefill });
+    const btn = el('button', { class: 'btn primary', type: 'submit' }, 'Skicka länk');
+    const form = el(
+      'form',
+      {
+        class: 'login',
+        onsubmit: async (e) => {
+          e.preventDefault();
+          btn.disabled = true;
+          err.textContent = '';
+          try {
+            await api('password/forgot', { method: 'POST', body: { email: email.value } });
+            authCard(
+              el(
+                'div',
+                { class: 'login' },
+                el('h1', {}, 'Kolla din e-post'),
+                el('p', {}, `Om ${email.value} är admin har vi skickat en länk för att välja nytt lösenord. Länken gäller i en timme.`),
+                el('a', { class: 'back', href: '/admin' }, '← Tillbaka till inloggningen')
+              )
+            );
+          } catch (ex) {
+            err.textContent = ex.message;
+            btn.disabled = false;
+          }
+        },
+      },
+      el('h1', {}, 'Glömt lösenordet?'),
+      el('p', {}, 'Skriv din e-postadress så skickar vi en länk där du väljer ett nytt lösenord.'),
+      el('label', { for: 'email' }, 'E-post'),
+      email,
+      err,
+      btn,
+      el('a', { class: 'back', href: '/admin' }, '← Tillbaka till inloggningen')
+    );
+    authCard(form);
+    email.focus();
+  }
+
+  async function renderReset() {
+    const token = new URLSearchParams(location.search).get('token');
+    document.title = 'Välj lösenord - ' + S.site.title;
+    let info;
+    try {
+      info = await api('password/check?token=' + encodeURIComponent(token || ''));
+    } catch (ex) {
+      authCard(
+        el(
+          'div',
+          { class: 'login' },
+          el('h1', {}, 'Länken fungerar inte'),
+          el('p', {}, ex.message),
+          el('button', { class: 'btn primary', type: 'button', onclick: () => renderForgot() }, 'Be om en ny länk'),
+          el('a', { class: 'back', href: '/' }, '← Till sajten')
+        )
+      );
+      return;
+    }
+    const err = el('div', { class: 'err', role: 'alert' });
+    const pass = el('input', { type: 'password', id: 'password', autocomplete: 'new-password', required: true, minlength: 8 });
+    const pass2 = el('input', { type: 'password', id: 'password2', autocomplete: 'new-password', required: true, minlength: 8 });
+    const btn = el('button', { class: 'btn primary', type: 'submit' }, 'Spara och logga in');
+    const form = el(
+      'form',
+      {
+        class: 'login',
+        onsubmit: async (e) => {
+          e.preventDefault();
+          err.textContent = '';
+          if (pass.value !== pass2.value) return (err.textContent = 'Lösenorden är inte likadana.');
+          btn.disabled = true;
+          try {
+            await api('password/set', { method: 'POST', body: { token, password: pass.value } });
+            await reload();
+            navigate('/', { replace: true });
+            toast(info.purpose === 'invite' ? 'Välkommen! Du är inloggad som admin.' : 'Lösenordet är bytt.');
+          } catch (ex) {
+            err.textContent = ex.message;
+            btn.disabled = false;
+          }
+        },
+      },
+      el('h1', {}, info.purpose === 'invite' ? 'Välkommen!' : 'Välj nytt lösenord'),
+      el('p', {}, `${info.email} · ${S.site.title}`),
+      el('input', { type: 'email', autocomplete: 'username', value: info.email, style: { display: 'none' }, readonly: true }),
+      el('label', { for: 'password' }, 'Lösenord (minst 8 tecken)'),
+      pass,
+      el('label', { for: 'password2' }, 'Upprepa lösenordet'),
+      pass2,
+      err,
+      btn
+    );
+    authCard(form);
+    pass.focus();
+  }
+
   function renderLogin() {
     document.title = 'Logga in - ' + S.site.title;
     const err = el('div', { class: 'err', role: 'alert' });
@@ -874,10 +981,144 @@
       pass,
       err,
       btn,
+      el('a', { class: 'back', href: '#', onclick: (e) => { e.preventDefault(); renderForgot(email.value); } }, 'Glömt lösenordet?'),
       el('a', { class: 'back', href: '/' }, '← Till sajten')
     );
-    app.replaceChildren(el('div', { class: 'login-wrap' }, form));
+    authCard(form);
     email.focus();
+  }
+
+  // ---------------------------------------------------------------- admins & password
+  async function manageAdmins() {
+    let data;
+    try {
+      data = await api('admins');
+    } catch (ex) {
+      return toast(ex.message, true);
+    }
+    const dlg = el('dialog', { class: 'dlg dlg-wide' });
+    const list = el('div', { class: 'admin-list' });
+    const note = el('div', { class: 'admin-note' });
+    const input = el('input', { type: 'email', placeholder: 'namn@exempel.se', 'aria-label': 'E-post till ny admin' });
+    const addBtn = el('button', { class: 'btn primary', type: 'submit' }, 'Bjud in');
+    const draw = () => {
+      list.replaceChildren(
+        ...data.admins.map((a) =>
+          el(
+            'div',
+            { class: 'admin-row' },
+            el('div', {}, el('div', { class: 'admin-email' }, a.email, a.email === data.me ? el('small', {}, ' (du)') : null), a.pending ? el('small', { class: 'pending' }, 'Inbjuden, har inte valt lösenord än') : null),
+            a.email === data.me
+              ? null
+              : el(
+                  'button',
+                  {
+                    class: 'btn danger',
+                    type: 'button',
+                    onclick: async () => {
+                      dlg.close();
+                      const ok = await confirmDlg(`Ta bort ${a.email}?`, 'Personen kan inte längre logga in som admin.', 'Ta bort', true);
+                      if (ok) {
+                        try {
+                          await api('admins/' + encodeURIComponent(a.email), { method: 'DELETE' });
+                          toast('Admin borttagen');
+                        } catch (ex) {
+                          toast(ex.message, true);
+                        }
+                      }
+                      manageAdmins();
+                    },
+                  },
+                  'Ta bort'
+                )
+          )
+        )
+      );
+    };
+    draw();
+    const form = el(
+      'form',
+      {
+        class: 'admin-add',
+        onsubmit: async (e) => {
+          e.preventDefault();
+          addBtn.disabled = true;
+          note.replaceChildren();
+          try {
+            const r = await api('admins', { method: 'POST', body: { email: input.value } });
+            data = await api('admins');
+            draw();
+            if (r.sent) note.append(`Inbjudan skickad till ${input.value}.`);
+            else {
+              const link = el('input', { value: r.link, readonly: true, onclick: (ev) => ev.target.select() });
+              note.append(
+                el('p', {}, r.warning ? `E-posten kunde inte skickas (${r.warning}). ` : 'Utskick av e-post är inte påslaget än. ', 'Skicka den här länken till personen själv. Den gäller i 7 dagar:'),
+                link
+              );
+            }
+            input.value = '';
+          } catch (ex) {
+            note.append(el('span', { class: 'err' }, ex.message));
+          }
+          addBtn.disabled = false;
+        },
+      },
+      input,
+      addBtn
+    );
+    dlg.append(
+      el(
+        'div',
+        { class: 'dlg-body' },
+        el('h3', {}, 'Administratörer'),
+        el('p', {}, 'Den du bjuder in får ett mejl med en länk för att välja lösenord och instruktioner för hur man redigerar sajten.'),
+        list,
+        form,
+        note,
+        el('div', { class: 'actions' }, el('button', { class: 'btn', type: 'button', onclick: () => dlg.close() }, 'Stäng'))
+      )
+    );
+    dlg.addEventListener('close', () => dlg.remove());
+    document.body.append(dlg);
+    dlg.showModal();
+    input.focus();
+  }
+
+  async function changePassword() {
+    const dlg = el('dialog', { class: 'dlg' });
+    const cur = el('input', { type: 'password', autocomplete: 'current-password', placeholder: 'Nuvarande lösenord', required: true });
+    const p1 = el('input', { type: 'password', autocomplete: 'new-password', placeholder: 'Nytt lösenord (minst 8 tecken)', required: true, minlength: 8 });
+    const p2 = el('input', { type: 'password', autocomplete: 'new-password', placeholder: 'Upprepa nytt lösenord', required: true, minlength: 8 });
+    const err = el('div', { class: 'err' });
+    const form = el(
+      'form',
+      {
+        onsubmit: async (e) => {
+          e.preventDefault();
+          err.textContent = '';
+          if (p1.value !== p2.value) return (err.textContent = 'Lösenorden är inte likadana.');
+          try {
+            await api('password/change', { method: 'POST', body: { current: cur.value, password: p1.value } });
+            dlg.close();
+            toast('Lösenordet är bytt');
+          } catch (ex) {
+            err.textContent = ex.message;
+          }
+        },
+      },
+      el('h3', {}, 'Byt lösenord'),
+      el('input', { type: 'email', autocomplete: 'username', value: S.site.me || '', style: { display: 'none' }, readonly: true }),
+      cur,
+      p1,
+      p2,
+      err,
+      el('div', { class: 'actions' }, el('button', { class: 'btn', type: 'button', onclick: () => dlg.close() }, 'Avbryt'), el('button', { class: 'btn primary', type: 'submit' }, 'Spara'))
+    );
+    dlg.append(form);
+    dlg.addEventListener('close', () => dlg.remove());
+    document.body.append(dlg);
+    dlg.showModal();
+    cur.focus();
   }
 
   // ---------------------------------------------------------------- editor

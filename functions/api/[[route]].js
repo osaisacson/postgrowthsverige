@@ -2,7 +2,11 @@ import {
   verifyPassword,
   makeSessionCookie,
   clearSessionCookie,
-  isAdmin,
+  currentAdmin,
+  hashPassword,
+  randomToken,
+  sha256,
+  sendEmail,
   json,
   uniqueSlug,
   getSite,
@@ -17,22 +21,32 @@ export async function onRequest(context) {
   const url = new URL(request.url);
   const parts = (params.route || []).map(decodeURIComponent);
   const method = request.method;
-  const admin = await isAdmin(request, env);
+  const me = await currentAdmin(request, env);
+  const admin = !!me;
 
   try {
-    // ---- public ----
-    if (parts[0] === 'site' && method === 'GET') return json(await getSite(env, admin));
-    if (parts[0] === 'login' && method === 'POST') return login(request, env, url);
-    if (parts[0] === 'logout' && method === 'POST') return json({ ok: true }, 200, { 'Set-Cookie': clearSessionCookie() });
-    if (parts[0] === 'me') return json({ admin });
-
-    // ---- everything below needs admin ----
-    if (!admin) return json({ error: 'Inte inloggad' }, 401);
     // Simple CSRF guard: browsers can't add custom headers cross-site without a CORS preflight we never allow.
     if (method !== 'GET' && request.headers.get('X-PGS') !== '1') return json({ error: 'Bad request' }, 400);
 
+    // ---- public ----
+    if (parts[0] === 'site' && method === 'GET') return json(await getSite(env, me));
+    if (parts[0] === 'login' && method === 'POST') return login(request, env, url);
+    if (parts[0] === 'logout' && method === 'POST') return json({ ok: true }, 200, { 'Set-Cookie': clearSessionCookie() });
+    if (parts[0] === 'me') return json({ admin, email: me });
+    if (parts[0] === 'password' && parts[1] === 'forgot' && method === 'POST') return forgotPassword(request, env, url);
+    if (parts[0] === 'password' && parts[1] === 'set' && method === 'POST') return setPassword(request, env, url);
+    if (parts[0] === 'password' && parts[1] === 'check' && method === 'GET') {
+      const tok = await readToken(env.DB, url.searchParams.get('token'));
+      return tok ? json({ email: tok.email, purpose: tok.purpose }) : json({ error: 'Länken är ogiltig eller har gått ut.' }, 400);
+    }
+
+    // ---- everything below needs admin ----
+    if (!admin) return json({ error: 'Inte inloggad' }, 401);
+
     const db = env.DB;
     const body = method === 'POST' || method === 'PATCH' ? await readBody(request) : {};
+    const handled = await adminRoutes(request, env, url, parts, method, me, body);
+    if (handled) return handled;
 
     if (parts[0] === 'settings' && method === 'PATCH') {
       if (typeof body.site_title === 'string' && body.site_title.trim()) {
@@ -161,28 +175,194 @@ async function readBody(request) {
   return {};
 }
 
+// ---------------------------------------------------------------- auth
+
+const WINDOW = 15 * 60 * 1000;
+async function rateLimited(db, key, max) {
+  const row = await db.prepare('SELECT fails, last_at FROM login_attempts WHERE ip = ?').bind(key).first();
+  return row && row.fails >= max && Date.now() - row.last_at < WINDOW;
+}
+async function countAttempt(db, key) {
+  const now = Date.now();
+  const row = await db.prepare('SELECT fails, last_at FROM login_attempts WHERE ip = ?').bind(key).first();
+  const fails = row && now - row.last_at < WINDOW ? row.fails + 1 : 1;
+  await db
+    .prepare('INSERT INTO login_attempts (ip, fails, last_at) VALUES (?, ?, ?) ON CONFLICT(ip) DO UPDATE SET fails = excluded.fails, last_at = excluded.last_at')
+    .bind(key, fails, now)
+    .run();
+}
+const normEmail = (e) => String(e || '').trim().toLowerCase();
+const validEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+
+// The first admin comes from the ADMIN_EMAIL / ADMIN_PASSWORD_HASH secrets; after that, admins live in the database.
+async function bootstrapOwner(env) {
+  const any = await env.DB.prepare('SELECT 1 FROM admins LIMIT 1').first();
+  if (!any && env.ADMIN_EMAIL && env.ADMIN_PASSWORD_HASH) {
+    await env.DB.prepare('INSERT OR IGNORE INTO admins (email, password_hash) VALUES (?, ?)').bind(normEmail(env.ADMIN_EMAIL), env.ADMIN_PASSWORD_HASH).run();
+  }
+}
+
 async function login(request, env, url) {
   const db = env.DB;
   const ip = request.headers.get('CF-Connecting-IP') || 'local';
-  const now = Date.now();
-  const row = await db.prepare('SELECT fails, last_at FROM login_attempts WHERE ip = ?').bind(ip).first();
-  if (row && row.fails >= 8 && now - row.last_at < 15 * 60 * 1000) {
-    return json({ error: 'För många försök. Vänta 15 minuter.' }, 429);
-  }
+  if (await rateLimited(db, ip, 8)) return json({ error: 'För många försök. Vänta 15 minuter.' }, 429);
+  await bootstrapOwner(env);
   const body = await request.json().catch(() => ({}));
-  const emailOk = String(body.email || '').trim().toLowerCase() === String(env.ADMIN_EMAIL || '').trim().toLowerCase();
-  const passOk = await verifyPassword(String(body.password || ''), env.ADMIN_PASSWORD_HASH);
-  if (!emailOk || !passOk) {
-    const fails = row && now - row.last_at < 15 * 60 * 1000 ? row.fails + 1 : 1;
-    await db
-      .prepare('INSERT INTO login_attempts (ip, fails, last_at) VALUES (?, ?, ?) ON CONFLICT(ip) DO UPDATE SET fails = excluded.fails, last_at = excluded.last_at')
-      .bind(ip, fails, now)
-      .run();
+  const email = normEmail(body.email);
+  const row = await db.prepare('SELECT password_hash FROM admins WHERE email = ?').bind(email).first();
+  const ok = row && row.password_hash && (await verifyPassword(String(body.password || ''), row.password_hash));
+  if (!ok) {
+    await countAttempt(db, ip);
     await new Promise((r) => setTimeout(r, 600));
     return json({ error: 'Fel e-post eller lösenord' }, 401);
   }
   await db.prepare('DELETE FROM login_attempts WHERE ip = ?').bind(ip).run();
-  return json({ ok: true }, 200, { 'Set-Cookie': await makeSessionCookie(env, url) });
+  return json({ ok: true }, 200, { 'Set-Cookie': await makeSessionCookie(env, url, email) });
+}
+
+async function issueToken(db, email, purpose, hours) {
+  const token = randomToken();
+  await db.batch([
+    db.prepare('DELETE FROM auth_tokens WHERE email = ? AND purpose = ?').bind(email, purpose),
+    db.prepare('INSERT INTO auth_tokens (token_hash, email, purpose, expires_at) VALUES (?, ?, ?, ?)').bind(await sha256(token), email, purpose, Date.now() + hours * 3600e3),
+  ]);
+  return token;
+}
+async function readToken(db, token) {
+  if (!token) return null;
+  const row = await db.prepare('SELECT email, purpose, expires_at FROM auth_tokens WHERE token_hash = ?').bind(await sha256(String(token))).first();
+  return row && row.expires_at > Date.now() ? row : null;
+}
+
+async function siteTitle(db) {
+  const r = await db.prepare("SELECT value FROM settings WHERE key = 'site_title'").first();
+  return r ? r.value : 'Post-growth Sverige';
+}
+
+function emailLayout(title, bodyHtml) {
+  return `<!doctype html><html><body style="margin:0;padding:24px;background:#f6f8f7;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#222;line-height:1.55">
+<div style="max-width:560px;margin:0 auto;background:#fff;border:1px solid #e4e7e5;border-radius:12px;padding:28px">
+<h1 style="font-family:Georgia,serif;font-size:22px;margin:0 0 16px">${title}</h1>${bodyHtml}</div></body></html>`;
+}
+const btn = (href, label) =>
+  `<p style="margin:24px 0"><a href="${href}" style="background:#2b8a55;color:#fff;text-decoration:none;padding:11px 18px;border-radius:8px;display:inline-block;font-weight:600">${label}</a></p>`;
+const escHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+function inviteEmail(site, origin, link, inviter) {
+  const admin = `${origin}/admin`;
+  const steps = [
+    `Gå till <a href="${admin}">${admin}</a> och logga in med din e-postadress och ditt lösenord.`,
+    'I menyn till vänster lägger du till en sektion med <b>Ny sektion</b>. Plustecknet bredvid en sektion skapar en ny sida i den.',
+    'Öppna en sida och klicka på <b>Redigera</b>. Du skriver i Markdown och ser resultatet direkt bredvid. Allt sparas automatiskt.',
+    'Skriv <code>[[</code> för att länka till en annan sida, till exempel <code>[[Definition]]</code>. Länkarna syns i grafen till höger.',
+    'Dra in eller klistra in en bild i texten för att ladda upp den.',
+    'Tre-punktsmenyn uppe till höger på en sida har fler val: innehållsförteckning av eller på, byt namn, flytta eller ta bort.',
+  ];
+  const html = emailLayout(
+    `Du är nu admin för ${escHtml(site)}`,
+    `<p>${escHtml(inviter)} har lagt till dig som admin för ${escHtml(site)}. Börja med att välja ett lösenord:</p>
+${btn(link, 'Välj lösenord')}
+<p style="font-size:13px;color:#5c625f">Länken gäller i 7 dagar.</p>
+<h2 style="font-family:Georgia,serif;font-size:17px;margin:28px 0 8px">Så redigerar du sajten</h2>
+<ol style="padding-left:20px">${steps.map((s) => `<li style="margin:6px 0">${s}</li>`).join('')}</ol>`
+  );
+  const text = `${inviter} har lagt till dig som admin för ${site}.
+
+Välj ett lösenord här (gäller i 7 dagar):
+${link}
+
+Så redigerar du sajten:
+${steps.map((s, i) => `${i + 1}. ${s.replace(/<[^>]+>/g, '')}`).join('\n')}
+`;
+  return { subject: `Du är nu admin för ${site}`, html, text };
+}
+
+function resetEmail(site, link) {
+  const html = emailLayout(
+    'Återställ ditt lösenord',
+    `<p>Någon bad om att återställa lösenordet för ditt admin-konto på ${escHtml(site)}. Klicka på knappen för att välja ett nytt lösenord:</p>
+${btn(link, 'Välj nytt lösenord')}
+<p style="font-size:13px;color:#5c625f">Länken gäller i 1 timme. Om det inte var du kan du strunta i det här mejlet.</p>`
+  );
+  const text = `Välj ett nytt lösenord för ditt admin-konto på ${site} (länken gäller i 1 timme):\n${link}\n\nOm det inte var du kan du strunta i det här mejlet.`;
+  return { subject: `Återställ lösenordet för ${site}`, html, text };
+}
+
+async function forgotPassword(request, env, url) {
+  const db = env.DB;
+  const ip = 'forgot:' + (request.headers.get('CF-Connecting-IP') || 'local');
+  if (await rateLimited(db, ip, 5)) return json({ error: 'För många försök. Vänta 15 minuter.' }, 429);
+  await countAttempt(db, ip);
+  await bootstrapOwner(env);
+  const body = await request.json().catch(() => ({}));
+  const email = normEmail(body.email);
+  const row = await db.prepare('SELECT email FROM admins WHERE email = ?').bind(email).first();
+  if (row) {
+    const token = await issueToken(db, email, 'reset', 1);
+    const msg = resetEmail(await siteTitle(db), `${url.origin}/admin/reset?token=${token}`);
+    await sendEmail(env, { to: email, ...msg }).catch(() => {});
+  }
+  // Same answer either way, so the form doesn't reveal who is an admin.
+  return json({ ok: true, emailConfigured: !!env.RESEND_API_KEY });
+}
+
+async function setPassword(request, env, url) {
+  const db = env.DB;
+  const body = await request.json().catch(() => ({}));
+  const tok = await readToken(db, body.token);
+  if (!tok) return json({ error: 'Länken är ogiltig eller har gått ut. Be om en ny.' }, 400);
+  const password = String(body.password || '');
+  if (password.length < 8) return json({ error: 'Lösenordet måste vara minst 8 tecken.' }, 400);
+  const exists = await db.prepare('SELECT 1 FROM admins WHERE email = ?').bind(tok.email).first();
+  if (!exists) return json({ error: 'Kontot finns inte längre.' }, 400);
+  await db.batch([
+    db.prepare('UPDATE admins SET password_hash = ? WHERE email = ?').bind(await hashPassword(password), tok.email),
+    db.prepare('DELETE FROM auth_tokens WHERE email = ?').bind(tok.email),
+  ]);
+  return json({ ok: true, email: tok.email }, 200, { 'Set-Cookie': await makeSessionCookie(env, url, tok.email) });
+}
+
+async function adminRoutes(request, env, url, parts, method, me, body) {
+  const db = env.DB;
+  if (parts[0] === 'password' && parts[1] === 'change' && method === 'POST') {
+    const row = await db.prepare('SELECT password_hash FROM admins WHERE email = ?').bind(me).first();
+    if (!row || !(await verifyPassword(String(body.current || ''), row.password_hash))) return json({ error: 'Nuvarande lösenord stämmer inte.' }, 400);
+    if (String(body.password || '').length < 8) return json({ error: 'Lösenordet måste vara minst 8 tecken.' }, 400);
+    await db.prepare('UPDATE admins SET password_hash = ? WHERE email = ?').bind(await hashPassword(String(body.password)), me).run();
+    return json({ ok: true });
+  }
+  if (parts[0] !== 'admins') return null;
+  if (!parts[1] && method === 'GET') {
+    const r = await db.prepare('SELECT email, password_hash IS NULL AS pending, invited_by, created_at FROM admins ORDER BY created_at').all();
+    return json({ me, emailConfigured: !!env.RESEND_API_KEY, admins: r.results.map((a) => ({ ...a, pending: !!a.pending })) });
+  }
+  if (!parts[1] && method === 'POST') {
+    const email = normEmail(body.email);
+    if (!validEmail(email)) return json({ error: 'Ange en giltig e-postadress.' }, 400);
+    const existing = await db.prepare('SELECT password_hash FROM admins WHERE email = ?').bind(email).first();
+    if (existing && existing.password_hash) return json({ error: 'Personen är redan admin.' }, 400);
+    if (!existing) await db.prepare('INSERT INTO admins (email, invited_by) VALUES (?, ?)').bind(email, me).run();
+    const token = await issueToken(db, email, 'invite', 24 * 7);
+    const link = `${url.origin}/admin/reset?token=${token}`;
+    const msg = inviteEmail(await siteTitle(db), url.origin, link, me);
+    let sent = false;
+    let warning = null;
+    try {
+      sent = await sendEmail(env, { to: email, ...msg });
+    } catch (err) {
+      warning = err.message;
+    }
+    return json({ ok: true, sent, link: sent ? null : link, warning });
+  }
+  if (parts[1] && method === 'DELETE') {
+    const email = normEmail(parts[1]);
+    if (email === me) return json({ error: 'Du kan inte ta bort dig själv.' }, 400);
+    const active = await db.prepare('SELECT COUNT(*) AS n FROM admins WHERE password_hash IS NOT NULL AND email != ?').bind(email).first();
+    if (!active.n) return json({ error: 'Det måste finnas minst en admin.' }, 400);
+    await db.batch([db.prepare('DELETE FROM auth_tokens WHERE email = ?').bind(email), db.prepare('DELETE FROM admins WHERE email = ?').bind(email)]);
+    return json({ ok: true });
+  }
+  return null;
 }
 
 async function upload(request, db, body) {
