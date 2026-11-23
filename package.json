@@ -1,0 +1,16 @@
+{
+  "name": "postgrowthsverige",
+  "version": "1.0.0",
+  "description": "Post-growth Sverige website",
+  "scripts": {
+    "dev": "wrangler pages dev --port 8788",
+    "deploy": "wrangler pages deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.114.17"
+  },
+  "dependencies": {
+    "marked": "^12.0.2"
+  },
+  "private": true
+}

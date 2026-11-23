@@ -1,0 +1,8 @@
+name = "postgrowthsverige"
+pages_build_output_dir = "public"
+compatibility_date = "2024-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "postgrowthsverige"
+database_id = "REPLACE_WITH_D1_ID"
